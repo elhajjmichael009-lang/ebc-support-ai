@@ -1,134 +1,45 @@
-# aida_client.py
-import requests
-from bs4 import BeautifulSoup
+def find_service_by_name(session: requests.Session, idProject: int, hotel_name: str):
+    """
+    Returns: { 'serviceId': int, 'serviceGroup': str }
+    Or None if not found.
+    """
 
-BASE = "https://aida.ebookingcenter.com"
-LOGIN = f"{BASE}/tourOperator/login/"
-PRICES_CAL = f"{BASE}/tourOperator/projects/services/servicePrices/Ajax.pricesCalendar.php"
-DAY_DETAILS = f"{BASE}/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
-
-def login_aida(username: str, password: str) -> requests.Session:
-    s = requests.Session()
-    payload = {"username": username, "password": password}
-    r = s.post(LOGIN, data=payload, allow_redirects=True, timeout=30)
-    # success if redirected or page has logout
-    if (r.url != LOGIN) or ("logout" in r.text.lower()):
-        return s
-    raise RuntimeError("AIDA login failed. Check credentials / form fields.")
-
-def fetch_month_calendar(session: requests.Session, idProject: int, idService: int, serviceGroup: str = "AC") -> str:
+    url = f"{BASE}/tourOperator/projects/services/servicesList/"
     headers = {
-        "Referer": f"{BASE}/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
         "X-Requested-With": "XMLHttpRequest",
-        "X-KL-ksospc-Ajax-Request": "Ajax_Request",
-        "Accept": "text/html, */*; q=0.01",
+        "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}",
+        "User-Agent": "Mozilla/5.0"
     }
-    r = session.get(PRICES_CAL, params={"refreshService": "1"}, headers=headers, timeout=30)
-    r.raise_for_status()
-    return r.text
 
-def fetch_day_html(session: requests.Session,
-                   idProject: int,
-                   idService: int,
-                   serviceGroup: str,
-                   date_iso: str,          # "YYYY-MM-DD"
-                   idScheme: int,
-                   priceSetId: int,
-                   priceType: str = "supplierPrice") -> str:
-    headers = {
-        "Referer": f"{BASE}/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
-        "Origin": BASE,
-        "X-Requested-With": "XMLHttpRequest",
-        "X-KL-ksospc-Ajax-Request": "Ajax_Request",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Accept": "text/plain, */*; q=0.01",
-    }
     data = {
-        "idService": str(idService),
-        "serviceGroup": serviceGroup,
-        "priceType": priceType,      # "supplierPrice" or "resellerPrice"
-        "date": date_iso,            # "YYYY-MM-DD"
-        "idScheme": str(idScheme),
-        "priceSetId": str(priceSetId),
+        "idProject": idProject,
+        "currentTab": "0"
     }
-    r = session.post(DAY_DETAILS, headers=headers, data=data, timeout=30)
-    r.raise_for_status()
-    return r.text
 
-def parse_day_html(html: str) -> dict:
-    """
-    Parse the HTML like the sample you sent and return:
-    {
-      "scheme": "Prices With TVA",
-      "groups": [
-        {"name": "Single - Standard Room", "items":[{"formula":"1*A","price":"29","currency":"USD"}, ...]},
-        ...
-      ]
-    }
-    """
-    from bs4 import BeautifulSoup
+    r = session.post(url, headers=headers, data=data)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    soup = BeautifulSoup(html, "html.parser")
-    out = {"scheme": None, "groups": []}
+    rows = soup.find_all("tr")
 
-    # pricing scheme
-    scheme_span = soup.find("span", class_="bold")
-    if scheme_span:
-        out["scheme"] = scheme_span.get_text(strip=True)
+    hotel_name = hotel_name.lower().strip()
 
-    # main container
-    container = soup.find("div", class_="container-fluid")
-    if not container:
-        return out
-
-    current = None
-
-    # ✅ FIXED: BeautifulSoup does NOT support the '>' combinator
-    # so we manually iterate through direct children
-    for row in container.find_all("div", recursive=False):
-
-        # 1️⃣ Header rows (bg-primary)
-        header = row.find("div", class_="col")
-        if header and "bg-primary" in header.get("class", []):
-            title = header.get_text(strip=True)
-            current = {"name": title, "items": []}
-            out["groups"].append(current)
+    for row in rows:
+        cols = row.find_all("td")
+        if len(cols) < 3:
             continue
 
-        # 2️⃣ Occupancy rows
-        if "occupancy-row" in row.get("class", []):
-            if current is None:
-                current = {"name": "Room", "items": []}
-                out["groups"].append(current)
+        # Hotel name appears in first big <td>, inside <div>
+        big_td = cols[1].get_text(" ", strip=True).lower()
 
-            left = row.find("div", class_="col-6")
-            rights = row.find_all("div", class_="col-6")
+        if hotel_name in big_td:
+            # Extract idService from the action buttons
+            link = cols[1].find("a", href=True)
+            if link and "idService=" in link["href"]:
+                idService = int(link["href"].split("idService=")[1].split("&")[0])
+                group = cols[2].get_text(strip=True)
+                return {
+                    "serviceId": idService,
+                    "serviceGroup": group
+                }
 
-            formula_text = ""
-            price_text = ""
-
-            if left:
-                formula_text = left.get_text(" ", strip=True)
-                formula_text = " ".join(formula_text.replace("\xa0", " ").split())
-
-            if rights:
-                price_text = rights[-1].get_text(" ", strip=True)
-                price_text = " ".join(price_text.split())
-
-            # Extract price + currency
-            price, currency = None, None
-            if price_text:
-                parts = price_text.split()
-                if len(parts) >= 2:
-                    currency = parts[-1]
-                    price = parts[-2]
-
-            if formula_text and price and currency:
-                current["items"].append({
-                    "formula": formula_text,
-                    "price": price,
-                    "currency": currency
-                })
-
-    return out
-
+    return None
