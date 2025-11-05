@@ -25,6 +25,11 @@ def login_aida(username: str, password: str) -> requests.Session:
 # 2) FIND HOTEL BY NAME → returns serviceId + serviceGroup
 # ============================================================
 def find_service_by_name(session: requests.Session, idProject: int, hotel_name: str):
+    """
+    Detect serviceId from hotel name.
+    Looks inside column 1 (td[1]) which contains:
+    [DF] Britannia Suites ★★★★☆
+    """
     url = f"{BASE}/tourOperator/projects/services/servicesList/"
     headers = {
         "X-Requested-With": "XMLHttpRequest",
@@ -40,23 +45,37 @@ def find_service_by_name(session: requests.Session, idProject: int, hotel_name: 
 
     for row in soup.find_all("tr"):
         cols = row.find_all("td")
-        if len(cols) < 3:
+        if len(cols) < 2:
             continue
 
-        big_td = cols[1].get_text(" ", strip=True).lower()
+        # ✅ The hotel name is inside the SECOND <td> (index 1)
+        text_block = cols[1].get_text(" ", strip=True).lower()
 
-        if hotel_name in big_td:
-            link = cols[1].find("a", href=True)
-            if link and "idService=" in link["href"]:
-                idService = int(link["href"].split("idService=")[1].split("&")[0])
-                serviceGroup = cols[2].get_text(strip=True)
+        if hotel_name in text_block:
+            # ✅ Extract serviceId from option links in last columns
+            link = row.find("button", {"tooltip": "Manage room types"})
+            if link and "data-url" in link.attrs:
+                url = link["data-url"]
+                if "idService=" in url:
+                    idService = int(url.split("idService=")[1].split("&")[0])
+                    serviceGroup = cols[2].get_text(strip=True)
+                    return {
+                        "serviceId": idService,
+                        "serviceGroup": serviceGroup
+                    }
 
-                return {
-                    "serviceId": idService,
-                    "serviceGroup": serviceGroup
-                }
+            # ✅ fallback: try any link with idService
+            for a in row.find_all("a", href=True):
+                if "idService=" in a["href"]:
+                    idService = int(a["href"].split("idService=")[1].split("&")[0])
+                    serviceGroup = cols[2].get_text(strip=True)
+                    return {
+                        "serviceId": idService,
+                        "serviceGroup": serviceGroup
+                    }
 
     return None
+
 
 
 # ============================================================
