@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from aida_client import (
     login_aida,
-    find_hotel_by_name,
+    find_hotel_by_name,       # ✅ FIXED NAME
     get_active_scheme_and_priceset,
     fetch_day_html,
     parse_day_html,
@@ -26,10 +26,6 @@ idProject = st.number_input("idProject", value=194)
 days_to_scan = st.number_input("Days to check ahead", value=30)
 priceType = st.selectbox("Price Type", ["supplierPrice", "resellerPrice"])
 
-
-# =============================================================
-# MAIN ACTION
-# =============================================================
 if st.button("Scan Missing Prices ✅", type="primary"):
 
     if not aida_user or not aida_pass:
@@ -56,10 +52,10 @@ if st.button("Scan Missing Prices ✅", type="primary"):
         idService = info["serviceId"]
         serviceGroup = info["serviceGroup"]
 
-        st.success(f"✅ Found: {info['name']} → serviceId={idService}")
+        st.success(f"✅ Found: {info['hotelName']} → serviceId={idService}, group={serviceGroup}")
 
         # SCHEME + PRICESET
-        st.write("📝 Detecting active scheme & priceSetId…")
+        st.write("📝 Detecting active scheme + priceSet…")
 
         idScheme, priceSetId = get_active_scheme_and_priceset(
             sess, idProject, idService, serviceGroup
@@ -67,17 +63,17 @@ if st.button("Scan Missing Prices ✅", type="primary"):
 
         st.success(f"✅ idScheme={idScheme}, priceSetId={priceSetId}")
 
-        # SCAN DAYS
-        today = datetime.now()
+        # SCAN NEXT DAYS
         missing = []
+        today = datetime.now()
 
         st.write(f"📅 Scanning next {days_to_scan} days…")
 
         for i in range(int(days_to_scan)):
             date_iso = (today + timedelta(days=i)).strftime("%Y-%m-%d")
-
             html = fetch_day_html(
-                sess, idService, serviceGroup, date_iso, idScheme, priceSetId, priceType
+                sess, idProject, idService, serviceGroup,
+                date_iso, idScheme, priceSetId, priceType
             )
             data = parse_day_html(html)
 
@@ -88,9 +84,9 @@ if st.button("Scan Missing Prices ✅", type="primary"):
         st.subheader("📌 Missing Prices Results")
 
         if not missing:
-            st.success("✅ All good! No missing prices.")
+            st.success("✅ No missing prices found. All days are priced correctly.")
         else:
-            st.error(f"❌ Missing {len(missing)} day(s).")
+            st.error(f"❌ Missing prices for {len(missing)} days.")
             st.table(pd.DataFrame({"Missing Dates": missing}))
 
     except Exception as e:
