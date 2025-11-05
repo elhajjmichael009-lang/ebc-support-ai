@@ -1,102 +1,146 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+from openai import OpenAI
+import os
+import pandas as pd
 
-st.set_page_config(page_title="AIDA Price Debugger", layout="wide")
+from aida_client import login_aida, fetch_day_html, parse_day_html
 
-st.title("🔍 AIDA Price Debugger")
+# ---- Streamlit Page Config ----
+st.set_page_config(page_title="EBC Support AI (Base + AIDA)", page_icon="🌐", layout="wide")
+st.title("🌐 EBC Support AI (Base + AIDA Day Prices)")
 
-st.info("Enter the values from AIDA to test the price extraction. After you click submit, the app will show the RAW HTML response.")
+# ---- OpenAI Setup ----
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+client = OpenAI()
 
-# -------------------------
-# INPUT FIELDS
-# -------------------------
-st.subheader("AIDA Parameters")
+# =========================================
+# SECTION 1 — Support AI (unchanged, gpt-4o-mini)
+# =========================================
+with st.container():
+    st.header("🤖 Support Case Analyzer")
 
-username = st.text_input("AIDA username")
-password = st.text_input("AIDA password", type="password")
+    colA, colB = st.columns(2)
+    with colA:
+        booking = st.text_area("📘 Booking Information", height=140,
+                               placeholder="Booking ID, Hotel, Dates, Room, Meal plan, Paid amount, Cancellation deadline...")
+        supplier = st.text_area("📨 Supplier Message", height=120)
+    with colB:
+        customer = st.text_area("💬 Customer Message", height=120)
+        policy = st.text_area("📝 Policy Text (optional)", height=120)
 
-idProject = st.text_input("idProject", "194")
-idService = st.text_input("idService", "10621")
-serviceGroup = st.text_input("serviceGroup", "AC")
+    if st.button("Analyze Case with AI", type="primary"):
+        if not os.getenv("OPENAI_API_KEY"):
+            st.error("OPENAI_API_KEY is missing (set it in Streamlit Secrets).")
+        else:
+            prompt = f"""
+You are EBooking Center's Support AI Agent.
 
-date = st.text_input("Date (YYYY-MM-DD)", "2025-11-05")
-idScheme = st.text_input("idScheme", "55565")
-priceSetId = st.text_input("priceSetId", "8520")
+Tasks:
+1) Give a clear case summary.
+2) Recommend refund outcome: Approved / Denied / Partial (+reason).
+3) Draft:
+   - Customer reply (professional, respectful, clear).
+   - Supplier message (what we need from them).
+   - Internal note (bullet points only).
 
-priceType = st.text_input("priceType", "supplierPrice")
+Booking:
+{booking}
 
-# -------------------------
-# SUBMIT BUTTON
-# -------------------------
-if st.button("Fetch Prices"):
-    st.warning("Sending request to AIDA…")
+Customer:
+{customer}
 
-    # AIDA URL for daily price popup
-    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
+Supplier:
+{supplier}
 
-    # Request payload
-    payload = {
-        "idService": idService,
-        "serviceGroup": serviceGroup,
-        "priceType": priceType,
-        "date": date,
-        "idScheme": idScheme,
-        "priceSetId": priceSetId
-    }
+Policy:
+{policy}
+"""
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            result = response.choices[0].message.content
+            st.subheader("✅ AI Result")
+            st.text_area("Generated Response", result, height=500)
 
-    # IMPORTANT: You MUST already be logged in to AIDA in your browser.
-    # So we need session cookies (browser cookies).
-    st.info("⚠️ You must paste your AIDA cookies for now.")
+# =========================================
+# SECTION 2 — AIDA Day Prices (login each time)
+# =========================================
+st.markdown("---")
+st.header("🏨 AIDA Day Prices")
 
-    cookies_input = st.text_input("Paste cookie string (AIDAtourOperator + AIDA) from browser DevTools", 
-                                  placeholder='AIDAtourOperator=xxxx; AIDA=yyyy')
+col1, col2, col3 = st.columns(3)
+with col1:
+    aida_user = st.text_input("AIDA Username")
+with col2:
+    aida_pass = st.text_input("AIDA Password", type="password")
+with col3:
+    priceType = st.selectbox("Price Type", ["supplierPrice", "resellerPrice"], index=0)
 
-    if cookies_input.strip() == "":
-        st.error("Missing cookies. Please paste your AIDA session cookies.")
+col4, col5, col6 = st.columns(3)
+with col4:
+    idProject = st.number_input("idProject", value=194, step=1)
+with col5:
+    idService = st.number_input("idService", value=10621, step=1)
+with col6:
+    serviceGroup = st.text_input("serviceGroup", value="AC")
+
+col7, col8, col9 = st.columns(3)
+with col7:
+    date_iso = st.text_input("Date (YYYY-MM-DD)", value="2025-11-05")
+with col8:
+    idScheme = st.number_input("idScheme", value=55565, step=1)
+with col9:
+    priceSetId = st.number_input("priceSetId", value=8520, step=1)
+
+if st.button("Fetch Day Prices", type="secondary"):
+    if not aida_user or not aida_pass:
+        st.error("Enter AIDA credentials.")
     else:
-        # Convert cookie string → dict
-        cookies = {}
         try:
-            for part in cookies_input.split(";"):
-                name, value = part.strip().split("=", 1)
-                cookies[name] = value
-        except:
-            st.error("Cookie format incorrect. It must look like: AIDAtourOperator=xxxx; AIDA=yyyy")
-            st.stop()
+            sess = login_aida(aida_user, aida_pass)
+            html = fetch_day_html(sess,
+                                  int(idProject), int(idService), serviceGroup,
+                                  date_iso, int(idScheme), int(priceSetId), priceType)
 
-        # Headers
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-            "User-Agent": "Mozilla/5.0",
-            "Origin": "https://aida.ebookingcenter.com",
-            "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
-        }
+            data = parse_day_html(html)
 
-        # -------------------------
-        # SEND REQUEST
-        # -------------------------
-        response = requests.post(url, headers=headers, data=payload, cookies=cookies)
+            # Show scheme
+            if data.get("scheme"):
+                st.caption(f"Pricing scheme: **{data['scheme']}**")
 
-        st.subheader("✅ RAW HTML RESPONSE FROM AIDA")
+            # Render tables per group
+            if not data["groups"]:
+                st.info("No price rows found for this day / scheme / price set.")
+            else:
+                all_rows = []
+                for grp in data["groups"]:
+                    st.subheader(grp["name"])
+                    if not grp["items"]:
+                        st.write("No items")
+                        continue
+                    df = pd.DataFrame(grp["items"])
+                    st.table(df)
+                    # collect for global CSV
+                    for it in grp["items"]:
+                        all_rows.append({
+                            "group": grp["name"],
+                            "formula": it["formula"],
+                            "price": it["price"],
+                            "currency": it["currency"],
+                            "date": date_iso,
+                            "priceType": priceType
+                        })
 
-        html = response.text
+                if all_rows:
+                    big = pd.DataFrame(all_rows)
+                    csv = big.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Download CSV", csv, file_name=f"aida_{idService}_{date_iso}.csv", mime="text/csv")
 
-        # ✅ SHOW HTML (YOU MUST COPY THIS FOR ME)
-        st.code(html, language="html")
+            # Debug toggle
+            with st.expander("🔧 Raw HTML (debug)"):
+                st.code(html, language="html")
 
-        # Also show status code
-        st.write(f"HTTP Status:", response.status_code)
-
-        # -------------------------
-        # BASIC PARSE TEST
-        # -------------------------
-        st.subheader("🧪 Parsing Test")
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Try to find price rows
-        rows = soup.find_all("div", class_="row")
-
-        st.write("Found rows:", len(rows))
+        except Exception as e:
+            st.error(f"AIDA error: {e}")
