@@ -11,16 +11,12 @@ def login_aida(username: str, password: str) -> requests.Session:
     s = requests.Session()
     payload = {"username": username, "password": password}
     r = s.post(LOGIN, data=payload, allow_redirects=True, timeout=30)
-    # success if redirected away from login OR page shows 'logout'
+    # success if redirected or page has logout
     if (r.url != LOGIN) or ("logout" in r.text.lower()):
         return s
-    raise RuntimeError("AIDA login failed. Check credentials / fields.")
+    raise RuntimeError("AIDA login failed. Check credentials / form fields.")
 
 def fetch_month_calendar(session: requests.Session, idProject: int, idService: int, serviceGroup: str = "AC") -> str:
-    """
-    Returns the month calendar HTML (big grid). Useful later to auto-find idScheme/priceSetId.
-    The referer matters; AIDA checks it. We set it via headers.
-    """
     headers = {
         "Referer": f"{BASE}/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
         "X-Requested-With": "XMLHttpRequest",
@@ -29,20 +25,16 @@ def fetch_month_calendar(session: requests.Session, idProject: int, idService: i
     }
     r = session.get(PRICES_CAL, params={"refreshService": "1"}, headers=headers, timeout=30)
     r.raise_for_status()
-    return r.text  # HTML
+    return r.text
 
-def fetch_day_prices(session: requests.Session,
-                     idProject: int,
-                     idService: int,
-                     serviceGroup: str,
-                     date_iso: str,          # e.g. "2025-11-05"
-                     idScheme: int,
-                     priceSetId: int,
-                     priceType: str = "supplierPrice") -> dict:
-    """
-    Calls the same endpoint your browser hits when you click a date.
-    Returns a structured dict with (category -> list of (formula, price, currency)).
-    """
+def fetch_day_html(session: requests.Session,
+                   idProject: int,
+                   idService: int,
+                   serviceGroup: str,
+                   date_iso: str,          # "YYYY-MM-DD"
+                   idScheme: int,
+                   priceSetId: int,
+                   priceType: str = "supplierPrice") -> str:
     headers = {
         "Referer": f"{BASE}/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
         "Origin": BASE,
@@ -54,38 +46,89 @@ def fetch_day_prices(session: requests.Session,
     data = {
         "idService": str(idService),
         "serviceGroup": serviceGroup,
-        "priceType": priceType,      # "supplierPrice" or "resellerPrice" etc.
+        "priceType": priceType,      # "supplierPrice" or "resellerPrice"
         "date": date_iso,            # "YYYY-MM-DD"
         "idScheme": str(idScheme),
         "priceSetId": str(priceSetId),
     }
     r = session.post(DAY_DETAILS, headers=headers, data=data, timeout=30)
     r.raise_for_status()
-    html = r.text
+    return r.text
 
-    # ---- parse the popup HTML (like your screenshot) ----
+def parse_day_html(html: str) -> dict:
+    """
+    Parse the HTML like the sample you sent and return:
+    {
+      "scheme": "Prices With TVA",
+      "groups": [
+        {"name": "Single - Standard Room", "items":[{"formula":"1*A","price":"29","currency":"USD"}, ...]},
+        ...
+      ]
+    }
+    """
     soup = BeautifulSoup(html, "html.parser")
-    out = {"date": date_iso, "groups": []}
+    out = {"scheme": None, "groups": []}
 
-    # group headers look like "SINGLE - STANDARD ROOM", etc.
-    # then multiple rows with formula and price "29 USD"
-    current_group = None
-    for el in soup.select("*"):
-        txt = (el.get_text(strip=True) or "")
-        # detect section header
-        if txt and txt.isupper() and ("ROOM" in txt or "APARTMENT" in txt or "SUITE" in txt):
-            current_group = {"name": txt, "items": []}
-            out["groups"].append(current_group)
+    # scheme
+    scheme_span = soup.find("span", class_="bold")
+    if scheme_span:
+        out["scheme"] = scheme_span.get_text(strip=True)
+
+    # The structure alternates: a header row (bg-primary) then many .occupancy-row rows
+    container = soup.find("div", class_="container-fluid")
+    if not container:
+        return out
+
+    current = None
+    for row in container.select("> .row, > div.row"):
+        # header row
+        header = row.find("div", class_="col")
+        if header and "bg-primary" in header.get("class", []):
+            title = header.get_text(strip=True)
+            current = {"name": title, "items": []}
+            out["groups"].append(current)
             continue
-        # detect price lines like "1A+1C1 — 29 USD"
-        if current_group and txt and ("USD" in txt or "EUR" in txt or "LBP" in txt):
-            # Often price is alone in a sibling node; we try to split last token as "PRICE CURRENCY"
-            parts = txt.split()
-            # simple heuristic: last two tokens form price+currency
-            if len(parts) >= 2:
-                currency = parts[-1]
-                price = parts[-2]
-                formula = " ".join(parts[:-2]).strip() or "N/A"
-                current_group["items"].append({"formula": formula, "price": price, "currency": currency})
+
+        # occupancy rows (formula + price)
+        if "occupancy-row" in row.get("class", []):
+            if current is None:
+                # if no header detected yet, create a generic group
+                current = {"name": "Room", "items": []}
+                out["groups"].append(current)
+
+            left = row.find("div", class_="col-6")
+            right = row.find_all("div", class_="col-6")
+            formula_text = ""
+            if left:
+                # left may include icons and <b> tags, but text is fine
+                formula_text = left.get_text(" ", strip=True)
+                # normalize spaces and the star symbol patterns
+                formula_text = (
+                    formula_text.replace("\xa0", " ")
+                                .replace("  ", " ")
+                                .replace("*", "*")
+                                .strip()
+                )
+
+            price_text = ""
+            if right:
+                # right[-1] is the price column (text-right)
+                price_text = right[-1].get_text(" ", strip=True)
+                price_text = " ".join(price_text.split())
+
+            # Typically ends with "29 USD" → split
+            price, currency = None, None
+            if price_text:
+                parts = price_text.split()
+                if len(parts) >= 2:
+                    currency = parts[-1]
+                    price = parts[-2]
+
+            if formula_text and price and currency:
+                current["items"].append({
+                    "formula": formula_text,
+                    "price": price,
+                    "currency": currency
+                })
 
     return out
