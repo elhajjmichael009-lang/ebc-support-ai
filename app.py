@@ -44,26 +44,32 @@ def try_json(response):
 #  AUTO-DETECT SERVICE
 # -----------------------------------
 def detect_service(session, idProject):
-    # Real AJAX endpoint for services list
-    ajax_url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/?idProject={idProject}"
+    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/"
 
     headers = {
         "X-Requested-With": "XMLHttpRequest",
-        "Accept": "text/html, */*; q=0.01",
         "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
     }
 
-    r = session.get(ajax_url, headers=headers)
+    # AIDA expects POST form data
+    data = {
+        "idProject": idProject,
+        "currentTab": "0"
+    }
+
+    r = session.post(url, headers=headers, data=data)
     html = r.text
 
+    # DEBUG: see real HTML if no rows
     soup = BeautifulSoup(html, "html.parser")
 
     rows = soup.find_all("tr")
 
     if not rows:
-        return None, html  # Show raw HTML in Streamlit so you see what's wrong
+        return None, html  # send HTML for debug in Streamlit
 
+    # Parse table rows to extract idService "AC" group
     for row in rows:
         cols = row.find_all("td")
         if len(cols) < 3:
@@ -79,6 +85,7 @@ def detect_service(session, idProject):
                 return idService, None
 
     return None, html
+
 
 def detect_scheme(session, idService):
     url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/accSchemes/?idService={idService}"
