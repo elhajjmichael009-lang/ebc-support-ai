@@ -66,22 +66,28 @@ def parse_day_html(html: str) -> dict:
       ]
     }
     """
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "html.parser")
     out = {"scheme": None, "groups": []}
 
-    # scheme
+    # pricing scheme
     scheme_span = soup.find("span", class_="bold")
     if scheme_span:
         out["scheme"] = scheme_span.get_text(strip=True)
 
-    # The structure alternates: a header row (bg-primary) then many .occupancy-row rows
+    # main container
     container = soup.find("div", class_="container-fluid")
     if not container:
         return out
 
     current = None
-    for row in container.select("> .row, > div.row"):
-        # header row
+
+    # ✅ FIXED: BeautifulSoup does NOT support the '>' combinator
+    # so we manually iterate through direct children
+    for row in container.find_all("div", recursive=False):
+
+        # 1️⃣ Header rows (bg-primary)
         header = row.find("div", class_="col")
         if header and "bg-primary" in header.get("class", []):
             title = header.get_text(strip=True)
@@ -89,34 +95,27 @@ def parse_day_html(html: str) -> dict:
             out["groups"].append(current)
             continue
 
-        # occupancy rows (formula + price)
+        # 2️⃣ Occupancy rows
         if "occupancy-row" in row.get("class", []):
             if current is None:
-                # if no header detected yet, create a generic group
                 current = {"name": "Room", "items": []}
                 out["groups"].append(current)
 
             left = row.find("div", class_="col-6")
-            right = row.find_all("div", class_="col-6")
-            formula_text = ""
-            if left:
-                # left may include icons and <b> tags, but text is fine
-                formula_text = left.get_text(" ", strip=True)
-                # normalize spaces and the star symbol patterns
-                formula_text = (
-                    formula_text.replace("\xa0", " ")
-                                .replace("  ", " ")
-                                .replace("*", "*")
-                                .strip()
-                )
+            rights = row.find_all("div", class_="col-6")
 
+            formula_text = ""
             price_text = ""
-            if right:
-                # right[-1] is the price column (text-right)
-                price_text = right[-1].get_text(" ", strip=True)
+
+            if left:
+                formula_text = left.get_text(" ", strip=True)
+                formula_text = " ".join(formula_text.replace("\xa0", " ").split())
+
+            if rights:
+                price_text = rights[-1].get_text(" ", strip=True)
                 price_text = " ".join(price_text.split())
 
-            # Typically ends with "29 USD" → split
+            # Extract price + currency
             price, currency = None, None
             if price_text:
                 parts = price_text.split()
