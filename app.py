@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
+import urllib.parse
 
 # -----------------------------
 # STREAMLIT UI
@@ -18,38 +19,98 @@ run_btn = st.button("🔍 Extract Prices")
 # -----------------------------
 # LOGIN FUNCTION
 # -----------------------------
-def aida_login(username, password):
-    session = requests.Session()
 
-    login_page = "https://aida.ebookingcenter.com/tourOperator/identity/login/"
-    headers = {
+BASE = "https://aida.ebookingcenter.com"
+
+def _absolute(url):
+    return url if url.startswith("http") else urllib.parse.urljoin(BASE, url)
+
+def aida_login(username: str, password: str):
+    s = requests.Session()
+    common_headers = {
         "User-Agent": "Mozilla/5.0",
-        "Referer": login_page,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
     }
 
-    # STEP 1 — Get login page to extract RequestVerificationToken
-    r = session.get(login_page, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
+    # Try PRIMARY login page (the one you showed earlier)
+    login_pages = [
+        f"{BASE}/tourOperator/login/",
+        f"{BASE}/tourOperator/identity/login/",
+    ]
 
-    token = soup.find("input", {"name": "__RequestVerificationToken"})
-    if not token:
-        return None
+    last_html = ""
+    for login_page in login_pages:
+        # 1) GET the login page to capture cookies + hidden inputs
+        r = s.get(login_page, headers={**common_headers, "Referer": login_page}, allow_redirects=True, timeout=30)
+        last_html = r.text
 
-    token_value = token.get("value")
+        soup = BeautifulSoup(r.text, "html.parser")
+        form = soup.find("form")
+        if not form:
+            # Some skins load form via JS; try next variant
+            continue
 
-    # STEP 2 — Send login POST including the token
-    data = {
-        "__RequestVerificationToken": token_value,
-        "username": username,
-        "password": password
-    }
+        # Build POST payload from all inputs present (keeps CSRF etc.)
+        payload = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            payload[name] = inp.get("value", "")
 
-    r2 = session.post(login_page, data=data, headers=headers, allow_redirects=True)
+        # Overwrite username/password fields (support multiple possible names)
+        # Common names seen: username / user / email ; password / passwd
+        for k in list(payload.keys()):
+            kn = k.lower()
+            if "user" in kn or "email" in kn or kn == "username":
+                payload[k] = username
+            if "pass" in kn or kn == "password":
+                payload[k] = password
 
-    # ✅ Successful login indicators
-    if "Logout" in r2.text or "AIDA TourOperator" in r2.text:
-        return session
+        # Some forms need a submit value
+        if "submit" not in payload:
+            payload["submit"] = "Login"
 
+        action = form.get("action") or login_page
+        post_url = _absolute(action)
+
+        headers = {
+            **common_headers,
+            "Origin": BASE,
+            "Referer": login_page,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+        r2 = s.post(post_url, data=payload, headers=headers, allow_redirects=True, timeout=30)
+        last_html = r2.text
+
+        # Heuristics for success
+        text_lower = r2.text.lower()
+        landed_ok = (
+            "logout" in text_lower or
+            "my profile" in text_lower or
+            "tour operator" in text_lower or
+            "dashboard" in text_lower or
+            "go to reseller" in text_lower
+        )
+
+        # Also check cookies usually set after login
+        has_cookie = any(c.name in ("AIDA", "AIDAtourOperator") for c in s.cookies)
+
+        if landed_ok and has_cookie:
+            return s  # ✅ success
+
+        # Some installs redirect to dashboard after another GET
+        dash = s.get(f"{BASE}/tourOperator/dashboard/", headers=common_headers, timeout=30)
+        if ("logout" in dash.text.lower()) or any(c.name in ("AIDA", "AIDAtourOperator") for c in s.cookies):
+            return s  # ✅ success
+
+        # otherwise try the next login variant in the loop
+
+    # If both variants failed, return None but keep last_html for debug at the call site
+    # (In your Streamlit code, print this when login is None.)
     return None
 
 # -----------------------------
