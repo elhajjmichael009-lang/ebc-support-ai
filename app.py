@@ -88,3 +88,4 @@ if st.button("Scan Missing Prices ✅", type="primary"):
             st.table(pd.DataFrame({"Missing Dates": missing}))
 
     except Exception as e:
+        st.error(f"🔥 ERROR: {e}")
