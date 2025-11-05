@@ -26,12 +26,11 @@ def login_aida(username: str, password: str) -> requests.Session:
 # ============================================================
 def find_service_by_name(session: requests.Session, idProject: int, hotel_name: str):
     """
-    Searches ALL pages of AIDA Services List (pagination).
+    Searches ALL pages of AIDA Services List (pagination uses 'start').
     Returns:
       { "serviceId": int, "serviceGroup": "AC" }
-    Or None if not found.
+    Or None.
     """
-
     hotel_name = hotel_name.lower().strip()
 
     url = f"{BASE}/tourOperator/projects/services/servicesList/"
@@ -41,14 +40,16 @@ def find_service_by_name(session: requests.Session, idProject: int, hotel_name: 
         "User-Agent": "Mozilla/5.0",
     }
 
-    page = 1
+    start = 0  # pagination offset
+    per_page = 10
 
     while True:
 
         payload = {
             "idProject": idProject,
             "currentTab": "0",
-            "page": page
+            "start": start,
+            "length": per_page
         }
 
         r = session.post(url, headers=headers, data=payload)
@@ -59,35 +60,32 @@ def find_service_by_name(session: requests.Session, idProject: int, hotel_name: 
         if not rows:
             break  # no more pages → stop
 
+        found_any_row = False
+
         for row in rows:
             cols = row.find_all("td")
             if len(cols) < 2:
                 continue
+            found_any_row = True
 
-            # Column 2: hotel name block
+            # Column 2: contains hotel name text
             block = cols[1].get_text(" ", strip=True).lower()
 
             if hotel_name in block:
-
-                # Most reliable: "Manage room types" popup URL
+                # Extract ID via data-url buttons (most reliable)
                 btn = row.find("button", {"data-url": True})
-                if btn:
-                    data_url = btn["data-url"]
-                    if "idService=" in data_url:
-                        idService = int(data_url.split("idService=")[1].split("&")[0])
-                        serviceGroup = cols[2].get_text(strip=True)
-                        return {"serviceId": idService, "serviceGroup": serviceGroup}
+                if btn and "idService=" in btn["data-url"]:
+                    idService = int(btn["data-url"].split("idService=")[1].split("&")[0])
+                    serviceGroup = cols[2].get_text(strip=True)
+                    return {"serviceId": idService, "serviceGroup": serviceGroup}
 
-                # Fallback: any link containing idService=
-                for a in row.find_all("a", href=True):
-                    if "idService=" in a["href"]:
-                        idService = int(a["href"].split("idService=")[1].split("&")[0])
-                        serviceGroup = cols[2].get_text(strip=True)
-                        return {"serviceId": idService, "serviceGroup": serviceGroup}
+        # If this page had rows → go to next page
+        if found_any_row:
+            start += per_page  # Next page offset
+        else:
+            break  # No more pages
 
-        page += 1  # go to next page
-
-    return None
+    return None  # not found
 
 
 
