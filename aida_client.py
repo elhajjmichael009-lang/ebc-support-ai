@@ -57,44 +57,31 @@ def fetch_day_html(session: requests.Session,
 
 def parse_day_html(html: str) -> dict:
     """
-    Parse the HTML structure returned by AIDA daily popup.
-    Returns:
+    Parse the HTML like the sample you sent and return:
     {
-        "scheme": "Prices With TVA",
-        "groups": [
-            {
-                "name": "Single - Standard Room",
-                "items": [
-                    {"formula": "1*A", "price": "29", "currency": "USD"},
-                    ...
-                ]
-            },
-            ...
-        ]
+      "scheme": "Prices With TVA",
+      "groups": [
+        {"name": "Single - Standard Room", "items":[{"formula":"1*A","price":"29","currency":"USD"}, ...]},
+        ...
+      ]
     }
     """
-
-    from bs4 import BeautifulSoup
-
     soup = BeautifulSoup(html, "html.parser")
     out = {"scheme": None, "groups": []}
 
-    # ✅ Pricing scheme (top of block)
+    # scheme
     scheme_span = soup.find("span", class_="bold")
     if scheme_span:
         out["scheme"] = scheme_span.get_text(strip=True)
 
-    # ✅ Main container
+    # The structure alternates: a header row (bg-primary) then many .occupancy-row rows
     container = soup.find("div", class_="container-fluid")
     if not container:
         return out
 
     current = None
-
-    # ✅ Loop over ONLY direct children (fix for the > selector error)
-    for row in container.find_all("div", recursive=False):
-
-        # ✅ HEADER row (room name)
+    for row in container.select("> .row, > div.row"):
+        # header row
         header = row.find("div", class_="col")
         if header and "bg-primary" in header.get("class", []):
             title = header.get_text(strip=True)
@@ -102,32 +89,35 @@ def parse_day_html(html: str) -> dict:
             out["groups"].append(current)
             continue
 
-        # ✅ OCCUPANCY row
+        # occupancy rows (formula + price)
         if "occupancy-row" in row.get("class", []):
             if current is None:
-                # In case no header detected
+                # if no header detected yet, create a generic group
                 current = {"name": "Room", "items": []}
                 out["groups"].append(current)
 
-            # Left: formula
-            left_col = row.find("div", class_="col-6")
+            left = row.find("div", class_="col-6")
+            right = row.find_all("div", class_="col-6")
             formula_text = ""
-            if left_col:
-                formula_text = left_col.get_text(" ", strip=True)
-                formula_text = " ".join(
-                    formula_text.replace("\xa0", " ").split()
+            if left:
+                # left may include icons and <b> tags, but text is fine
+                formula_text = left.get_text(" ", strip=True)
+                # normalize spaces and the star symbol patterns
+                formula_text = (
+                    formula_text.replace("\xa0", " ")
+                                .replace("  ", " ")
+                                .replace("*", "*")
+                                .strip()
                 )
 
-            # Right: price
-            right_cols = row.find_all("div", class_="col-6")
             price_text = ""
-            if right_cols:
-                price_text = right_cols[-1].get_text(" ", strip=True)
+            if right:
+                # right[-1] is the price column (text-right)
+                price_text = right[-1].get_text(" ", strip=True)
                 price_text = " ".join(price_text.split())
 
-            price = None
-            currency = None
-
+            # Typically ends with "29 USD" → split
+            price, currency = None, None
             if price_text:
                 parts = price_text.split()
                 if len(parts) >= 2:
@@ -140,7 +130,5 @@ def parse_day_html(html: str) -> dict:
                     "price": price,
                     "currency": currency
                 })
-
-    return out
 
     return out
