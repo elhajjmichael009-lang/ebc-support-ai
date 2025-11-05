@@ -1,22 +1,21 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+import json
 
 st.title("🏨 AIDA Day Prices (Auto Mode)")
 
 # --- INPUTS ---
 username = st.text_input("AIDA Username")
 password = st.text_input("AIDA Password", type="password")
-
 idProject = st.text_input("idProject", "194")
 date = st.text_input("Date (YYYY-MM-DD)", "2025-11-05")
-
 priceType = st.selectbox("Price Type", ["supplierPrice", "clientPrice"])
 
 
-# ------------------------
-# AIDA LOGIN
-# ------------------------
+# -----------------------------------
+#  LOGIN
+# -----------------------------------
 def aida_login(username, password):
     login_url = "https://aida.ebookingcenter.com/tourOperator/login/"
     session = requests.Session()
@@ -31,41 +30,58 @@ def aida_login(username, password):
     return session
 
 
-# ------------------------
-# AUTO-DETECT idService
-# ------------------------
+# -----------------------------------
+#  SAFE JSON LOADER (IMPORTANT FIX)
+# -----------------------------------
+def try_json(response):
+    try:
+        return response.json()
+    except:
+        return None
+
+
+# -----------------------------------
+#  AUTO-DETECT SERVICE
+# -----------------------------------
 def detect_service(session, idProject):
     url = f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}"
     r = session.get(url)
-    data = r.json()
+
+    data = try_json(r)
+    if not data:
+        return None, r.text  # return raw html as error
 
     for s in data:
-        if s.get("serviceGroup") == "AC":  # accommodation
-            return s["idService"]
+        if s.get("serviceGroup") == "AC":
+            return s["idService"], None
 
-    return None
+    return None, data
 
 
-# ------------------------
-# AUTO-DETECT idScheme + priceSetId
-# ------------------------
-def detect_scheme_and_priceset(session, idService):
+# -----------------------------------
+#  AUTO-DETECT SCHEME + PRICESET
+# -----------------------------------
+def detect_scheme(session, idService):
     url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/accSchemes/?idService={idService}"
     r = session.get(url)
-    data = r.json()
 
+    data = try_json(r)
+    if not data:
+        return None, None, r.text
+
+    # find default scheme
     for scheme in data:
-        if scheme.get("default") == True:
-            return scheme["idScheme"], scheme["idPriceSet"]
+        if scheme.get("default") is True:
+            return scheme["idScheme"], scheme["idPriceSet"], None
 
     # fallback
     scheme = data[0]
-    return scheme["idScheme"], scheme["idPriceSet"]
+    return scheme["idScheme"], scheme["idPriceSet"], None
 
 
-# ------------------------
-# FETCH DAY PRICES
-# ------------------------
+# -----------------------------------
+#  FETCH PRICES
+# -----------------------------------
 def fetch_day_prices(session, idService, idScheme, priceSetId, priceType, date):
     url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
 
@@ -82,26 +98,39 @@ def fetch_day_prices(session, idService, idScheme, priceSetId, priceType, date):
     return r.text
 
 
-# ------------------------
-# RUN
-# ------------------------
+# -----------------------------------
+#  BUTTON ACTION
+# -----------------------------------
 if st.button("Fetch Day Prices"):
-    with st.spinner("Logging in..."):
+    with st.spinner("Logging into AIDA..."):
         session = aida_login(username, password)
 
-    with st.spinner("Detecting Service for this Hotel..."):
-        idService = detect_service(session, idProject)
+    # ---- SERVICE ----
+    with st.spinner("Detecting accommodation service..."):
+        idService, error = detect_service(session, idProject)
 
-    st.success(f"✅ Auto-detected idService = {idService}")
+    if idService is None:
+        st.error("❌ Could not detect idService")
+        st.code(error)
+        st.stop()
 
-    with st.spinner("Detecting Scheme + PriceSet..."):
-        idScheme, priceSetId = detect_scheme_and_priceset(session, idService)
+    st.success(f"✅ idService = {idService}")
 
-    st.success(f"✅ Auto-detected idScheme = {idScheme}")
-    st.success(f"✅ Auto-detected priceSetId = {priceSetId}")
+    # ---- SCHEME ----
+    with st.spinner("Detecting scheme + priceSet..."):
+        idScheme, priceSetId, error = detect_scheme(session, idService)
 
-    with st.spinner("Fetching Day Prices..."):
+    if idScheme is None:
+        st.error("❌ Could not detect scheme")
+        st.code(error)
+        st.stop()
+
+    st.success(f"✅ idScheme = {idScheme}")
+    st.success(f"✅ priceSetId = {priceSetId}")
+
+    # ---- PRICES ----
+    with st.spinner("Fetching prices..."):
         html = fetch_day_prices(session, idService, idScheme, priceSetId, priceType, date)
 
-    st.subheader("✅ Raw HTML from AIDA")
+    st.subheader("✅ Raw HTML Response")
     st.code(html)
