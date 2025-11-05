@@ -1,100 +1,102 @@
 import streamlit as st
-from openai import OpenAI
-import os
+import requests
+from bs4 import BeautifulSoup
 
-# ---- Streamlit Page Config ----
-st.set_page_config(page_title="EBC Support AI (Base)", page_icon="🌐")
-st.title("🌐 EBC Support AI (Base)")
+st.set_page_config(page_title="AIDA Price Debugger", layout="wide")
 
-# ---- OpenAI Setup ----
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-client = OpenAI()
+st.title("🔍 AIDA Price Debugger")
 
-# ---- Form Inputs ----
-st.subheader("📘 Booking Information")
-booking = st.text_area("Paste booking details", height=140)
+st.info("Enter the values from AIDA to test the price extraction. After you click submit, the app will show the RAW HTML response.")
 
-st.subheader("💬 Customer Message")
-customer = st.text_area("Paste customer message", height=120)
+# -------------------------
+# INPUT FIELDS
+# -------------------------
+st.subheader("AIDA Parameters")
 
-st.subheader("📨 Supplier Message")
-supplier = st.text_area("Paste supplier message", height=120)
+username = st.text_input("AIDA username")
+password = st.text_input("AIDA password", type="password")
 
-st.subheader("📝 Policy Text (optional)")
-policy = st.text_area("Paste policy text", height=120)
+idProject = st.text_input("idProject", "194")
+idService = st.text_input("idService", "10621")
+serviceGroup = st.text_input("serviceGroup", "AC")
 
-# ---- AI Analysis Button ----
-if st.button("🤖 Analyze Case"):
-    if not os.getenv("OPENAI_API_KEY"):
-        st.error("OPENAI_API_KEY is missing (set it in Streamlit Secrets).")
+date = st.text_input("Date (YYYY-MM-DD)", "2025-11-05")
+idScheme = st.text_input("idScheme", "55565")
+priceSetId = st.text_input("priceSetId", "8520")
+
+priceType = st.text_input("priceType", "supplierPrice")
+
+# -------------------------
+# SUBMIT BUTTON
+# -------------------------
+if st.button("Fetch Prices"):
+    st.warning("Sending request to AIDA…")
+
+    # AIDA URL for daily price popup
+    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
+
+    # Request payload
+    payload = {
+        "idService": idService,
+        "serviceGroup": serviceGroup,
+        "priceType": priceType,
+        "date": date,
+        "idScheme": idScheme,
+        "priceSetId": priceSetId
+    }
+
+    # IMPORTANT: You MUST already be logged in to AIDA in your browser.
+    # So we need session cookies (browser cookies).
+    st.info("⚠️ You must paste your AIDA cookies for now.")
+
+    cookies_input = st.text_input("Paste cookie string (AIDAtourOperator + AIDA) from browser DevTools", 
+                                  placeholder='AIDAtourOperator=xxxx; AIDA=yyyy')
+
+    if cookies_input.strip() == "":
+        st.error("Missing cookies. Please paste your AIDA session cookies.")
     else:
-        prompt = f"""
-You are EBooking Center's Support AI Agent.
+        # Convert cookie string → dict
+        cookies = {}
+        try:
+            for part in cookies_input.split(";"):
+                name, value = part.strip().split("=", 1)
+                cookies[name] = value
+        except:
+            st.error("Cookie format incorrect. It must look like: AIDAtourOperator=xxxx; AIDA=yyyy")
+            st.stop()
 
-Tasks:
-1) Give a clear case summary.
-2) Recommend refund outcome: Approved / Denied / Partial (+reason).
-3) Draft:
-   - Customer reply (professional, respectful, clear).
-   - Supplier message (what we need from them).
-   - Internal note (bullet points only).
+        # Headers
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://aida.ebookingcenter.com",
+            "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/?idProject={idProject}&idService={idService}&serviceGroup={serviceGroup}",
+        }
 
-Booking:
-{booking}
+        # -------------------------
+        # SEND REQUEST
+        # -------------------------
+        response = requests.post(url, headers=headers, data=payload, cookies=cookies)
 
-Customer:
-{customer}
+        st.subheader("✅ RAW HTML RESPONSE FROM AIDA")
 
-Supplier:
-{supplier}
+        html = response.text
 
-Policy:
-{policy}
-"""
+        # ✅ SHOW HTML (YOU MUST COPY THIS FOR ME)
+        st.code(html, language="html")
 
-        # ✅ NEW OpenAI API + gpt-4o-mini (no rate limit issues)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
+        # Also show status code
+        st.write(f"HTTP Status:", response.status_code)
 
-        result = response.choices[0].message.content
+        # -------------------------
+        # BASIC PARSE TEST
+        # -------------------------
+        st.subheader("🧪 Parsing Test")
 
-        # Display result
-        st.subheader("✅ AI Result")
-        st.text_area("Generated Response", result, height=500)
-# ---- AIDA Expander (Base) ----
-with st.expander("🏨 AIDA Day Prices (base)"):
-    st.caption("Logs in each time → fetches the same popup you see when clicking a date in AIDA.")
-    aida_user = st.text_input("AIDA username")
-    aida_pass = st.text_input("AIDA password", type="password")
+        soup = BeautifulSoup(html, "html.parser")
 
-    cols = st.columns(3)
-    idProject = cols[0].number_input("idProject", value=194, step=1)
-    idService = cols[1].number_input("idService", value=10621, step=1)
-    serviceGroup = cols[2].text_input("serviceGroup", value="AC")
+        # Try to find price rows
+        rows = soup.find_all("div", class_="row")
 
-    date_iso = st.text_input("Date (YYYY-MM-DD)", value="2025-11-05")
-    idScheme = st.number_input("idScheme", value=55565, step=1)
-    priceSetId = st.number_input("priceSetId", value=8520, step=1)
-    priceType = st.selectbox("priceType", ["supplierPrice", "resellerPrice"], index=0)
-
-    if st.button("Fetch AIDA Day Prices"):
-        if not aida_user or not aida_pass:
-            st.error("Enter AIDA credentials.")
-        else:
-            try:
-                from aida_client import login_aida, fetch_day_prices
-                sess = login_aida(aida_user, aida_pass)
-                data = fetch_day_prices(sess, int(idProject), int(idService), serviceGroup,
-                                        date_iso, int(idScheme), int(priceSetId), priceType)
-                st.success(f"Prices for {data['date']}")
-                for grp in data["groups"]:
-                    st.markdown(f"**{grp['name']}**")
-                    if not grp["items"]:
-                        st.write("No items")
-                    for it in grp["items"]:
-                        st.write(f"- {it['formula']} → {it['price']} {it['currency']}")
-            except Exception as e:
-                st.error(f"AIDA error: {e}")
+        st.write("Found rows:", len(rows))
