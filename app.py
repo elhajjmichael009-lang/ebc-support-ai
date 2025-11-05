@@ -44,23 +44,36 @@ def try_json(response):
 #  AUTO-DETECT SERVICE
 # -----------------------------------
 def detect_service(session, idProject):
-    url = f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}"
+    # This is the REAL endpoint that returns the services table
+    url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/?idProject={idProject}"
     r = session.get(url)
 
-    data = try_json(r)
-    if not data:
-        return None, r.text  # return raw html as error
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    for s in data:
-        if s.get("serviceGroup") == "AC":
-            return s["idService"], None
+    # Find all rows
+    rows = soup.find_all("tr")
 
-    return None, data
+    for row in rows:
+        cols = row.find_all("td")
+        if len(cols) < 3:
+            continue
 
+        service_group = cols[2].get_text(strip=True)
 
-# -----------------------------------
-#  AUTO-DETECT SCHEME + PRICESET
-# -----------------------------------
+        # find AC service
+        if service_group == "AC":
+            # The idService is inside the first column (the link)
+            link = cols[0].find("a")
+            if link and "idService=" in link.get("href"):
+                href = link.get("href")
+                # extract idService from URL
+                # example: ?idService=10621&idProject=194
+                parts = href.split("idService=")[1]
+                idService = parts.split("&")[0]
+                return idService, None
+
+    return None, r.text  # return HTML if not found
+
 def detect_scheme(session, idService):
     url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/accSchemes/?idService={idService}"
     r = session.get(url)
