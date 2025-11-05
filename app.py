@@ -117,40 +117,49 @@ def aida_login(username: str, password: str):
 # AUTO DETECT SERVICE (AC)
 # -----------------------------
 def detect_service(session, idProject):
-    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/"
+    """Auto-detect the first Accommodation (AC) service for the project."""
+
+    url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/?idProject={idProject}"
 
     headers = {
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}",
         "User-Agent": "Mozilla/5.0",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}"
     }
 
-    data = {"idProject": idProject, "currentTab": "0"}
-
-    r = session.post(url, headers=headers, data=data)
+    r = session.get(url, headers=headers)
     html = r.text
 
     soup = BeautifulSoup(html, "html.parser")
-    rows = soup.find_all("tr")
 
+    # ✅ Find service rows inside ANY table
+    rows = soup.find_all("tr")
     if not rows:
-        return None, html
+        return None, html  # return HTML for debugging
 
     for row in rows:
         cols = row.find_all("td")
-        if len(cols) < 3:
+        if len(cols) < 2:
             continue
 
-        group = cols[2].get_text(strip=True)
+        # ✅ Find group indicator "AC"
+        text_all = row.get_text(" ", strip=True)
 
-        if group == "AC":
-            link = cols[0].find("a")
-            if link and "idService=" in link.get("href"):
-                href = link.get("href")
-                idService = href.split("idService=")[1].split("&")[0]
-                return idService, None
+        if "AC" not in text_all:
+            continue
+
+        # ✅ Find link with idService
+        link = row.find("a", href=True)
+        if not link:
+            continue
+
+        href = link["href"]
+        if "idService=" in href:
+            idService = href.split("idService=")[1].split("&")[0]
+            return idService, None
 
     return None, html
+
 
 # -----------------------------
 # DETECT idScheme + priceSetId
