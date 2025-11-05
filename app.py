@@ -64,3 +64,37 @@ Policy:
         # Display result
         st.subheader("✅ AI Result")
         st.text_area("Generated Response", result, height=500)
+# ---- AIDA Expander (Base) ----
+with st.expander("🏨 AIDA Day Prices (base)"):
+    st.caption("Logs in each time → fetches the same popup you see when clicking a date in AIDA.")
+    aida_user = st.text_input("AIDA username")
+    aida_pass = st.text_input("AIDA password", type="password")
+
+    cols = st.columns(3)
+    idProject = cols[0].number_input("idProject", value=194, step=1)
+    idService = cols[1].number_input("idService", value=10621, step=1)
+    serviceGroup = cols[2].text_input("serviceGroup", value="AC")
+
+    date_iso = st.text_input("Date (YYYY-MM-DD)", value="2025-11-05")
+    idScheme = st.number_input("idScheme", value=55565, step=1)
+    priceSetId = st.number_input("priceSetId", value=8520, step=1)
+    priceType = st.selectbox("priceType", ["supplierPrice", "resellerPrice"], index=0)
+
+    if st.button("Fetch AIDA Day Prices"):
+        if not aida_user or not aida_pass:
+            st.error("Enter AIDA credentials.")
+        else:
+            try:
+                from aida_client import login_aida, fetch_day_prices
+                sess = login_aida(aida_user, aida_pass)
+                data = fetch_day_prices(sess, int(idProject), int(idService), serviceGroup,
+                                        date_iso, int(idScheme), int(priceSetId), priceType)
+                st.success(f"Prices for {data['date']}")
+                for grp in data["groups"]:
+                    st.markdown(f"**{grp['name']}**")
+                    if not grp["items"]:
+                        st.write("No items")
+                    for it in grp["items"]:
+                        st.write(f"- {it['formula']} → {it['price']} {it['currency']}")
+            except Exception as e:
+                st.error(f"AIDA error: {e}")
