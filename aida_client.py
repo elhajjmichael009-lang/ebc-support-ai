@@ -55,11 +55,33 @@ def fetch_day_html(session: requests.Session,
     r.raise_for_status()
     return r.text
 
-    # ✅ FIXED: BeautifulSoup does NOT support ">" combinator.
-    # So we manually iterate through direct children only.
-    for row in container.find_all("div", recursive=False):
+def parse_day_html(html: str) -> dict:
+    """
+    Parse the HTML like the sample you sent and return:
+    {
+      "scheme": "Prices With TVA",
+      "groups": [
+        {"name": "Single - Standard Room", "items":[{"formula":"1*A","price":"29","currency":"USD"}, ...]},
+        ...
+      ]
+    }
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    out = {"scheme": None, "groups": []}
 
-        # 1) Header row (room name)
+    # scheme
+    scheme_span = soup.find("span", class_="bold")
+    if scheme_span:
+        out["scheme"] = scheme_span.get_text(strip=True)
+
+    # The structure alternates: a header row (bg-primary) then many .occupancy-row rows
+    container = soup.find("div", class_="container-fluid")
+    if not container:
+        return out
+
+    current = None
+    for row in container.select("> .row, > div.row"):
+        # header row
         header = row.find("div", class_="col")
         if header and "bg-primary" in header.get("class", []):
             title = header.get_text(strip=True)
@@ -67,26 +89,34 @@ def fetch_day_html(session: requests.Session,
             out["groups"].append(current)
             continue
 
-        # 2) Occupancy rows
+        # occupancy rows (formula + price)
         if "occupancy-row" in row.get("class", []):
             if current is None:
+                # if no header detected yet, create a generic group
                 current = {"name": "Room", "items": []}
                 out["groups"].append(current)
 
             left = row.find("div", class_="col-6")
-            rights = row.find_all("div", class_="col-6")
-
+            right = row.find_all("div", class_="col-6")
             formula_text = ""
-            price_text = ""
-
             if left:
+                # left may include icons and <b> tags, but text is fine
                 formula_text = left.get_text(" ", strip=True)
-                formula_text = " ".join(formula_text.replace("\xa0", " ").split())
+                # normalize spaces and the star symbol patterns
+                formula_text = (
+                    formula_text.replace("\xa0", " ")
+                                .replace("  ", " ")
+                                .replace("*", "*")
+                                .strip()
+                )
 
-            if rights:
-                price_text = rights[-1].get_text(" ", strip=True)
+            price_text = ""
+            if right:
+                # right[-1] is the price column (text-right)
+                price_text = right[-1].get_text(" ", strip=True)
                 price_text = " ".join(price_text.split())
 
+            # Typically ends with "29 USD" → split
             price, currency = None, None
             if price_text:
                 parts = price_text.split()
@@ -101,3 +131,4 @@ def fetch_day_html(session: requests.Session,
                     "currency": currency
                 })
 
+    return out
