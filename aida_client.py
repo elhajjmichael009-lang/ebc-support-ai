@@ -25,43 +25,50 @@ def login_aida(username: str, password: str) -> requests.Session:
 # ============================================================
 # ✅ FIND HOTEL BY NAME (SEARCHES ALL PAGES)
 # ============================================================
-def find_hotel_by_name(session, idProject, hotelName):
-    page = 1
+def find_hotel_by_name(session, idProject, hotelName, max_pages=50):
     hotelName = hotelName.lower().strip()
 
-    while True:
-        payload = {
-            "resultsPerPage": 200,
-            "currentPage": page,
-            "idProject": idProject,
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "X-KL-ksospc-Ajax-Request": "Ajax_Request",
+        "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    }
+
+    for page in range(1, max_pages + 1):
+        data = {
+            "resultsPerPage": "100",
+            "currentPage": str(page),
+            "idProject": str(idProject),
         }
 
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "X-KL-ksospc-Ajax-Request": "Ajax_Request",
-            "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}"
-        }
+        r = session.post(f"{BASE}/tourOperator/projects/services/servicesList/Ajax.servicesList.php",
+                         headers=headers, data=data, timeout=30)
 
-        r = session.post(SERVICE_LIST, data=payload, headers=headers)
-        if r.status_code != 200:
-            return None
+        # sometimes returns HTML if session expired
+        if "DOCTYPE" in r.text:
+            raise RuntimeError("Session expired or not authorized on AIDA.")
 
-        data = r.json()
+        try:
+            js = r.json()
+        except Exception:
+            raise RuntimeError("Invalid JSON response from AIDA services list")
 
-        items = data.get("items", [])
+        items = js.get("items", [])
         if not items:
-            return None  # no more pages
+            break
 
         for item in items:
             name = item.get("serviceName", "").lower()
             if hotelName in name:
                 return {
                     "serviceId": int(item["idService"]),
-                    "serviceGroup": item["serviceGroup"],
-                    "hotelName": item["serviceName"]
+                    "serviceGroup": item.get("serviceGroup", "AC"),
+                    "hotelName": item.get("serviceName", "Unknown")
                 }
 
-        page += 1
+    return None
+
 
 
 # ============================================================
