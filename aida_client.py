@@ -26,53 +26,66 @@ def login_aida(username: str, password: str) -> requests.Session:
 # ============================================================
 def find_service_by_name(session: requests.Session, idProject: int, hotel_name: str):
     """
-    Detect serviceId from hotel name.
-    Looks inside column 1 (td[1]) which contains:
-    [DF] Britannia Suites ★★★★☆
+    Searches ALL pages of AIDA Services List (pagination).
+    Returns:
+      { "serviceId": int, "serviceGroup": "AC" }
+    Or None if not found.
     """
+
+    hotel_name = hotel_name.lower().strip()
+
     url = f"{BASE}/tourOperator/projects/services/servicesList/"
     headers = {
         "X-Requested-With": "XMLHttpRequest",
         "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
     }
-    data = {"idProject": idProject, "currentTab": "0"}
 
-    r = session.post(url, headers=headers, data=data)
-    soup = BeautifulSoup(r.text, "html.parser")
+    page = 1
 
-    hotel_name = hotel_name.lower().strip()
+    while True:
 
-    for row in soup.find_all("tr"):
-        cols = row.find_all("td")
-        if len(cols) < 2:
-            continue
+        payload = {
+            "idProject": idProject,
+            "currentTab": "0",
+            "page": page
+        }
 
-        # ✅ The hotel name is inside the SECOND <td> (index 1)
-        text_block = cols[1].get_text(" ", strip=True).lower()
+        r = session.post(url, headers=headers, data=payload)
+        html = r.text
+        soup = BeautifulSoup(html, "html.parser")
 
-        if hotel_name in text_block:
-            # ✅ Extract serviceId from option links in last columns
-            link = row.find("button", {"tooltip": "Manage room types"})
-            if link and "data-url" in link.attrs:
-                url = link["data-url"]
-                if "idService=" in url:
-                    idService = int(url.split("idService=")[1].split("&")[0])
-                    serviceGroup = cols[2].get_text(strip=True)
-                    return {
-                        "serviceId": idService,
-                        "serviceGroup": serviceGroup
-                    }
+        rows = soup.find_all("tr")
+        if not rows:
+            break  # no more pages → stop
 
-            # ✅ fallback: try any link with idService
-            for a in row.find_all("a", href=True):
-                if "idService=" in a["href"]:
-                    idService = int(a["href"].split("idService=")[1].split("&")[0])
-                    serviceGroup = cols[2].get_text(strip=True)
-                    return {
-                        "serviceId": idService,
-                        "serviceGroup": serviceGroup
-                    }
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 2:
+                continue
+
+            # Column 2: hotel name block
+            block = cols[1].get_text(" ", strip=True).lower()
+
+            if hotel_name in block:
+
+                # Most reliable: "Manage room types" popup URL
+                btn = row.find("button", {"data-url": True})
+                if btn:
+                    data_url = btn["data-url"]
+                    if "idService=" in data_url:
+                        idService = int(data_url.split("idService=")[1].split("&")[0])
+                        serviceGroup = cols[2].get_text(strip=True)
+                        return {"serviceId": idService, "serviceGroup": serviceGroup}
+
+                # Fallback: any link containing idService=
+                for a in row.find_all("a", href=True):
+                    if "idService=" in a["href"]:
+                        idService = int(a["href"].split("idService=")[1].split("&")[0])
+                        serviceGroup = cols[2].get_text(strip=True)
+                        return {"serviceId": idService, "serviceGroup": serviceGroup}
+
+        page += 1  # go to next page
 
     return None
 
