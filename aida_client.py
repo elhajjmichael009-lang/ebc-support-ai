@@ -35,6 +35,9 @@ def find_hotel_by_name(session, idProject, hotelName, max_pages=50):
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
 
+    # ✅ FIX: AIDA requires ?idProject in the URL
+    base_url = f"{BASE}/tourOperator/projects/services/servicesList/Ajax.servicesList.php?idProject={idProject}"
+
     for page in range(1, max_pages + 1):
         data = {
             "resultsPerPage": "100",
@@ -42,17 +45,17 @@ def find_hotel_by_name(session, idProject, hotelName, max_pages=50):
             "idProject": str(idProject),
         }
 
-        r = session.post(f"{BASE}/tourOperator/projects/services/servicesList/Ajax.servicesList.php",
-                         headers=headers, data=data, timeout=30)
+        r = session.post(base_url, headers=headers, data=data, timeout=30)
 
-        # sometimes returns HTML if session expired
+        # If HTML → URL is wrong or missing idProject
         if "DOCTYPE" in r.text:
-            raise RuntimeError("Session expired or not authorized on AIDA.")
+            raise RuntimeError("AIDA returned HTML instead of JSON (wrong endpoint).")
 
+        # Parse JSON
         try:
             js = r.json()
-        except Exception:
-            raise RuntimeError("Invalid JSON response from AIDA services list")
+        except:
+            raise RuntimeError("Invalid JSON from AIDA services list")
 
         items = js.get("items", [])
         if not items:
@@ -64,10 +67,11 @@ def find_hotel_by_name(session, idProject, hotelName, max_pages=50):
                 return {
                     "serviceId": int(item["idService"]),
                     "serviceGroup": item.get("serviceGroup", "AC"),
-                    "hotelName": item.get("serviceName", "Unknown")
+                    "hotelName": item.get("serviceName", "Unknown"),
                 }
 
     return None
+
 
 
 
