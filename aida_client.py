@@ -24,87 +24,63 @@ def login_aida(username: str, password: str) -> requests.Session:
 # ============================================================
 # 2) FIND HOTEL BY NAME → returns serviceId + serviceGroup
 # ============================================================
-def find_service_by_name(session, idProject, hotel_name):
+def find_hotel_by_name(session, idProject, hotel_name, max_pages=50):
     """
-    Fully emulates AIDA DataTables AJAX used in Services List.
-    Works on all pages.
-    """
-    hotel_name = hotel_name.lower().strip()
+    Search through all pages in Services List to find a hotel by name.
 
-    url = f"{BASE}/tourOperator/projects/services/servicesList/Ajax.servicesList.php"
+    Returns:
+    - idService
+    - serviceGroup
+    - matched_hotel_name
+    """
+    url = f"{BASE}/tourOperator/projects/services/servicesList/"
 
     headers = {
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-KL-ksospc-Ajax-Request": "Ajax_Request",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "User-Agent": "Mozilla/5.0",
     }
 
-    start = 0
-    length = 50   # Fetch 50 per page (faster)
-    draw = 1      
-
-    while True:
-        payload = {
-            "draw": str(draw),
-            "columns[0][data]": "0",
-            "columns[1][data]": "1",
-            "columns[2][data]": "2",
-            "columns[3][data]": "3",
-            "columns[4][data]": "4",
-            "columns[5][data]": "5",
-            "columns[6][data]": "6",
-
-            "order[0][column]": "0",
-            "order[0][dir]": "asc",
-
-            "start": str(start),
-            "length": str(length),
-
-            "search[value]": "",
-            "search[regex]": "false",
-
-            "idProject": idProject,
-            "currentTab": "0",
+    for page in range(1, max_pages + 1):
+        data = {
+            "resultsPerPage": "10",
+            "currentPage": str(page),
+            "idProject": str(idProject)
         }
 
-        r = session.post(url, data=payload, headers=headers)
-        r.raise_for_status()
+        r = session.post(url, headers=headers, data=data, timeout=20)
+        html = r.text
 
-        try:
-            js = r.json()
-        except:
-            st.write("DEBUG:", r.text[:5000])
-            return None
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.find_all("tr")
 
-        data = js.get("data", [])
-        if not data:
-            return None
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 3:
+                continue
 
-        for row in data:
-            row_html = row[1]  # HTML block containing hotel name
+            name_text = cols[1].get_text(" ", strip=True)
+            if hotel_name.lower() in name_text.lower():
+                # extract idService from buttons
+                btn = cols[1].find("button", {"data-url": True})
+                if not btn:
+                    continue
 
-            if hotel_name in row_html.lower():
-                # Extract service ID from <button data-url="...idService=11400">
-                soup = BeautifulSoup(row_html, "html.parser")
-                btn = soup.find("button", {"data-url": True})
-                if btn:
-                    url = btn["data-url"]
-                    if "idService=" in url:
-                        idService = url.split("idService=")[1].split("&")[0]
-                        return {
-                            "serviceId": int(idService),
-                            "serviceGroup": "AC"
-                        }
+                data_url = btn["data-url"]
+                # extract idService (example: ...?idService=11400)
+                if "idService=" in data_url:
+                    idService = data_url.split("idService=")[1].split("&")[0]
+                    serviceGroup = "AC"  # always AC in your project
 
-        # Move to the next DataTables chunk
-        start += length
-        draw += 1
+                    return int(idService), serviceGroup, name_text
 
-        # Stop if we fetched all rows
-        if start >= js.get("recordsTotal", 0):
-            return None
+        # no rows found? stop early
+        if not rows:
+            break
 
+    return None, None, None
 
 
 
