@@ -1,48 +1,39 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import json
+from openai import OpenAI
 
-st.title("🏨 AIDA Day Prices (Auto Mode)")
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.title("AIDA Price Extractor (Auto-Detect Version)")
 
-# --- INPUTS ---
 username = st.text_input("AIDA Username")
 password = st.text_input("AIDA Password", type="password")
-idProject = st.text_input("idProject", "194")
+idProject = st.text_input("Project ID", "194")
 date = st.text_input("Date (YYYY-MM-DD)", "2025-11-05")
-priceType = st.selectbox("Price Type", ["supplierPrice", "clientPrice"])
 
+run_btn = st.button("🔍 Extract Prices")
 
-# -----------------------------------
-#  LOGIN
-# -----------------------------------
+# -----------------------------
+# LOGIN FUNCTION
+# -----------------------------
 def aida_login(username, password):
-    login_url = "https://aida.ebookingcenter.com/tourOperator/login/"
     session = requests.Session()
+    login_url = "https://aida.ebookingcenter.com/tourOperator/identity/login"
 
-    payload = {
-        "username": username,
-        "password": password,
-        "submit": "Login"
-    }
+    data = {"username": username, "password": password}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    r = session.post(login_url, data=payload)
-    return session
+    r = session.post(login_url, data=data, headers=headers, allow_redirects=True)
 
+    if "Logout" in r.text or "AIDA TourOperator" in r.text:
+        return session
+    return None
 
-# -----------------------------------
-#  SAFE JSON LOADER (IMPORTANT FIX)
-# -----------------------------------
-def try_json(response):
-    try:
-        return response.json()
-    except:
-        return None
-
-
-# -----------------------------------
-#  AUTO-DETECT SERVICE
-# -----------------------------------
+# -----------------------------
+# AUTO DETECT SERVICE (AC)
+# -----------------------------
 def detect_service(session, idProject):
     url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/"
 
@@ -52,32 +43,25 @@ def detect_service(session, idProject):
         "User-Agent": "Mozilla/5.0",
     }
 
-    # AIDA expects POST form data
-    data = {
-        "idProject": idProject,
-        "currentTab": "0"
-    }
+    data = {"idProject": idProject, "currentTab": "0"}
 
     r = session.post(url, headers=headers, data=data)
     html = r.text
 
-    # DEBUG: see real HTML if no rows
     soup = BeautifulSoup(html, "html.parser")
-
     rows = soup.find_all("tr")
 
     if not rows:
-        return None, html  # send HTML for debug in Streamlit
+        return None, html
 
-    # Parse table rows to extract idService "AC" group
     for row in rows:
         cols = row.find_all("td")
         if len(cols) < 3:
             continue
 
-        service_group = cols[2].get_text(strip=True)
+        group = cols[2].get_text(strip=True)
 
-        if service_group == "AC":
+        if group == "AC":
             link = cols[0].find("a")
             if link and "idService=" in link.get("href"):
                 href = link.get("href")
@@ -86,77 +70,124 @@ def detect_service(session, idProject):
 
     return None, html
 
+# -----------------------------
+# DETECT idScheme + priceSetId
+# -----------------------------
+def detect_scheme_and_priceset(session, idService):
+    url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/?idService={idService}"
 
-def detect_scheme(session, idService):
-    url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/accSchemes/?idService={idService}"
     r = session.get(url)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    data = try_json(r)
-    if not data:
+    scheme_input = soup.find("input", {"name": "idScheme"})
+    priceset_input = soup.find("input", {"name": "priceSetId"})
+
+    if not scheme_input or not priceset_input:
         return None, None, r.text
 
-    # find default scheme
-    for scheme in data:
-        if scheme.get("default") is True:
-            return scheme["idScheme"], scheme["idPriceSet"], None
+    scheme = scheme_input.get("value")
+    priceset = priceset_input.get("value")
 
-    # fallback
-    scheme = data[0]
-    return scheme["idScheme"], scheme["idPriceSet"], None
+    return scheme, priceset, None
 
+# -----------------------------
+# EXTRACT PRICES
+# -----------------------------
+def extract_prices(session, idService, idScheme, priceSetId, date):
+    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/loadDatePrices/"
 
-# -----------------------------------
-#  FETCH PRICES
-# -----------------------------------
-def fetch_day_prices(session, idService, idScheme, priceSetId, priceType, date):
-    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
-
-    payload = {
+    data = {
         "idService": idService,
-        "serviceGroup": "AC",
-        "priceType": priceType,
-        "date": date,
         "idScheme": idScheme,
         "priceSetId": priceSetId,
+        "loadDate": date,
+        "priceType": "supplierPrice",
+        "serviceGroup": "AC",
     }
 
-    r = session.post(url, data=payload)
-    return r.text
+    r = session.post(url, data=data)
+    html = r.text
 
+    soup = BeautifulSoup(html, "html.parser")
 
-# -----------------------------------
-#  BUTTON ACTION
-# -----------------------------------
-if st.button("Fetch Day Prices"):
-    with st.spinner("Logging into AIDA..."):
-        session = aida_login(username, password)
+    results = []
 
-    # ---- SERVICE ----
-    with st.spinner("Detecting accommodation service..."):
-        idService, error = detect_service(session, idProject)
+    # Room title rows
+    room_titles = soup.find_all("div", class_="bg-primary")
+
+    for title in room_titles:
+        room_name = title.get_text(strip=True)
+
+        # Next rows are prices
+        row = title.find_parent("div").find_next_sibling("div")
+
+        while row and "occupancy-row" in row.get("class", []):
+            cols = row.find_all("div", class_="col-6")
+
+            occupancy = cols[0].get_text(strip=True)
+            price = cols[1].get_text(strip=True)
+
+            results.append({
+                "room": room_name,
+                "occupancy": occupancy,
+                "price": price
+            })
+
+            row = row.find_next_sibling("div")
+
+    return results, html
+
+# -----------------------------
+# RUN PROCESS
+# -----------------------------
+if run_btn:
+
+    st.write("🔑 Logging in…")
+
+    session = aida_login(username, password)
+
+    if session is None:
+        st.error("❌ Login failed.")
+        st.stop()
+
+    st.success("✅ Logged in!")
+
+    # Detect service
+    st.write("🔎 Detecting idService…")
+
+    idService, debug1 = detect_service(session, idProject)
 
     if idService is None:
         st.error("❌ Could not detect idService")
-        st.code(error)
+        st.code(debug1, language="html")
         st.stop()
 
     st.success(f"✅ idService = {idService}")
 
-    # ---- SCHEME ----
-    with st.spinner("Detecting scheme + priceSet..."):
-        idScheme, priceSetId, error = detect_scheme(session, idService)
+    # Detect scheme + priceSetId
+    st.write("🔎 Detecting idScheme + priceSetId…")
+
+    idScheme, priceSetId, debug2 = detect_scheme_and_priceset(session, idService)
 
     if idScheme is None:
-        st.error("❌ Could not detect scheme")
-        st.code(error)
+        st.error("❌ Could not detect scheme or priceSetId")
+        st.code(debug2, language="html")
         st.stop()
 
     st.success(f"✅ idScheme = {idScheme}")
     st.success(f"✅ priceSetId = {priceSetId}")
 
-    # ---- PRICES ----
-    with st.spinner("Fetching prices..."):
-        html = fetch_day_prices(session, idService, idScheme, priceSetId, priceType, date)
+    # Extract prices
+    st.write("📥 Extracting prices…")
 
-    st.subheader("✅ Raw HTML Response")
-    st.code(html)
+    prices, debug_html = extract_prices(session, idService, idScheme, priceSetId, date)
+
+    if not prices:
+        st.error("❌ Could not extract prices.")
+        st.code(debug_html, language="html")
+        st.stop()
+
+    st.success("✅ Prices extracted!")
+
+    for p in prices:
+        st.write(f"**{p['room']}** — {p['occupancy']} → **{p['price']}**")
