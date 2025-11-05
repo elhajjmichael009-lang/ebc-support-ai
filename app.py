@@ -44,14 +44,25 @@ def try_json(response):
 #  AUTO-DETECT SERVICE
 # -----------------------------------
 def detect_service(session, idProject):
-    # This is the REAL endpoint that returns the services table
-    url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/?idProject={idProject}"
-    r = session.get(url)
+    # Real AJAX endpoint for services list
+    ajax_url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicesList/?idProject={idProject}"
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "text/html, */*; q=0.01",
+        "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/projectDetails/services/?idProject={idProject}",
+        "User-Agent": "Mozilla/5.0"
+    }
 
-    # Find all rows
+    r = session.get(ajax_url, headers=headers)
+    html = r.text
+
+    soup = BeautifulSoup(html, "html.parser")
+
     rows = soup.find_all("tr")
+
+    if not rows:
+        return None, html  # Show raw HTML in Streamlit so you see what's wrong
 
     for row in rows:
         cols = row.find_all("td")
@@ -60,19 +71,14 @@ def detect_service(session, idProject):
 
         service_group = cols[2].get_text(strip=True)
 
-        # find AC service
         if service_group == "AC":
-            # The idService is inside the first column (the link)
             link = cols[0].find("a")
             if link and "idService=" in link.get("href"):
                 href = link.get("href")
-                # extract idService from URL
-                # example: ?idService=10621&idProject=194
-                parts = href.split("idService=")[1]
-                idService = parts.split("&")[0]
+                idService = href.split("idService=")[1].split("&")[0]
                 return idService, None
 
-    return None, r.text  # return HTML if not found
+    return None, html
 
 def detect_scheme(session, idService):
     url = f"https://aida.ebookingcenter.com/tourOperator/projects/services/accSchemes/?idService={idService}"
