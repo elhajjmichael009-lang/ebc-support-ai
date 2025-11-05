@@ -20,15 +20,36 @@ run_btn = st.button("🔍 Extract Prices")
 # -----------------------------
 def aida_login(username, password):
     session = requests.Session()
-    login_url = "https://aida.ebookingcenter.com/tourOperator/identity/login"
 
-    data = {"username": username, "password": password}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    login_page = "https://aida.ebookingcenter.com/tourOperator/identity/login/"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": login_page,
+    }
 
-    r = session.post(login_url, data=data, headers=headers, allow_redirects=True)
+    # STEP 1 — Get login page to extract RequestVerificationToken
+    r = session.get(login_page, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    if "Logout" in r.text or "AIDA TourOperator" in r.text:
+    token = soup.find("input", {"name": "__RequestVerificationToken"})
+    if not token:
+        return None
+
+    token_value = token.get("value")
+
+    # STEP 2 — Send login POST including the token
+    data = {
+        "__RequestVerificationToken": token_value,
+        "username": username,
+        "password": password
+    }
+
+    r2 = session.post(login_page, data=data, headers=headers, allow_redirects=True)
+
+    # ✅ Successful login indicators
+    if "Logout" in r2.text or "AIDA TourOperator" in r2.text:
         return session
+
     return None
 
 # -----------------------------
