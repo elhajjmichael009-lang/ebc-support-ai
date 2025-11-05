@@ -24,68 +24,87 @@ def login_aida(username: str, password: str) -> requests.Session:
 # ============================================================
 # 2) FIND HOTEL BY NAME → returns serviceId + serviceGroup
 # ============================================================
-def find_service_by_name(session: requests.Session, idProject: int, hotel_name: str):
+def find_service_by_name(session, idProject, hotel_name):
     """
-    Searches ALL pages of AIDA Services List (pagination uses 'start').
-    Returns:
-      { "serviceId": int, "serviceGroup": "AC" }
-    Or None.
+    Fully emulates AIDA DataTables AJAX used in Services List.
+    Works on all pages.
     """
     hotel_name = hotel_name.lower().strip()
 
-    url = f"{BASE}/tourOperator/projects/services/servicesList/"
+    url = f"{BASE}/tourOperator/projects/services/servicesList/Ajax.servicesList.php"
+
     headers = {
         "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer": f"{BASE}/tourOperator/projects/projectDetails/services/?idProject={idProject}",
         "User-Agent": "Mozilla/5.0",
     }
 
-    start = 0  # pagination offset
-    per_page = 10
+    start = 0
+    length = 50   # Fetch 50 per page (faster)
+    draw = 1      
 
     while True:
-
         payload = {
+            "draw": str(draw),
+            "columns[0][data]": "0",
+            "columns[1][data]": "1",
+            "columns[2][data]": "2",
+            "columns[3][data]": "3",
+            "columns[4][data]": "4",
+            "columns[5][data]": "5",
+            "columns[6][data]": "6",
+
+            "order[0][column]": "0",
+            "order[0][dir]": "asc",
+
+            "start": str(start),
+            "length": str(length),
+
+            "search[value]": "",
+            "search[regex]": "false",
+
             "idProject": idProject,
             "currentTab": "0",
-            "start": start,
-            "length": per_page
         }
 
-        r = session.post(url, headers=headers, data=payload)
-        html = r.text
-        soup = BeautifulSoup(html, "html.parser")
+        r = session.post(url, data=payload, headers=headers)
+        r.raise_for_status()
 
-        rows = soup.find_all("tr")
-        if not rows:
-            break  # no more pages → stop
+        try:
+            js = r.json()
+        except:
+            st.write("DEBUG:", r.text[:5000])
+            return None
 
-        found_any_row = False
+        data = js.get("data", [])
+        if not data:
+            return None
 
-        for row in rows:
-            cols = row.find_all("td")
-            if len(cols) < 2:
-                continue
-            found_any_row = True
+        for row in data:
+            row_html = row[1]  # HTML block containing hotel name
 
-            # Column 2: contains hotel name text
-            block = cols[1].get_text(" ", strip=True).lower()
+            if hotel_name in row_html.lower():
+                # Extract service ID from <button data-url="...idService=11400">
+                soup = BeautifulSoup(row_html, "html.parser")
+                btn = soup.find("button", {"data-url": True})
+                if btn:
+                    url = btn["data-url"]
+                    if "idService=" in url:
+                        idService = url.split("idService=")[1].split("&")[0]
+                        return {
+                            "serviceId": int(idService),
+                            "serviceGroup": "AC"
+                        }
 
-            if hotel_name in block:
-                # Extract ID via data-url buttons (most reliable)
-                btn = row.find("button", {"data-url": True})
-                if btn and "idService=" in btn["data-url"]:
-                    idService = int(btn["data-url"].split("idService=")[1].split("&")[0])
-                    serviceGroup = cols[2].get_text(strip=True)
-                    return {"serviceId": idService, "serviceGroup": serviceGroup}
+        # Move to the next DataTables chunk
+        start += length
+        draw += 1
 
-        # If this page had rows → go to next page
-        if found_any_row:
-            start += per_page  # Next page offset
-        else:
-            break  # No more pages
+        # Stop if we fetched all rows
+        if start >= js.get("recordsTotal", 0):
+            return None
 
-    return None  # not found
 
 
 
