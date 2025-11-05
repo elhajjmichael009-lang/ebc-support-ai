@@ -1,146 +1,273 @@
 import streamlit as st
-from openai import OpenAI
-import os
-import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from html import unescape
 
-from aida_client import login_aida, fetch_day_html, parse_day_html
+st.set_page_config(page_title="AIDA Day Prices", page_icon="🏨", layout="wide")
 
-# ---- Streamlit Page Config ----
-st.set_page_config(page_title="EBC Support AI (Base + AIDA)", page_icon="🌐", layout="wide")
-st.title("🌐 EBC Support AI (Base + AIDA Day Prices)")
+# ---------- Helpers ----------
+def parse_services_list(html: str):
+    """
+    Parse the Services List page HTML (already loaded in your browser and pasted here).
+    Returns a list of dicts: {idService, hotel, stars, status, raw_label}
+    """
+    soup = BeautifulSoup(html, "lxml")
 
-# ---- OpenAI Setup ----
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-client = OpenAI()
+    # each service is typically one table row <tr>…</tr>
+    rows = soup.find_all("tr")
+    services = []
 
-# =========================================
-# SECTION 1 — Support AI (unchanged, gpt-4o-mini)
-# =========================================
-with st.container():
-    st.header("🤖 Support Case Analyzer")
+    for tr in rows:
+        # find the 'options' menu links which contain idService in URLs
+        links = tr.find_all("a", href=True)
+        id_service = None
+        for a in links:
+            href = a["href"]
+            if "servicePrices/?" in href and "idService=" in href:
+                # example: ...servicePrices/?idProject=194&idService=11400&serviceGroup=AC...
+                try:
+                    id_service = href.split("idService=", 1)[1].split("&", 1)[0]
+                    break
+                except Exception:
+                    pass
+        if not id_service:
+            # try alternative button set (e.g., passengersList, capacities)
+            for a in links:
+                href = a["href"]
+                if "idService=" in href:
+                    try:
+                        id_service = href.split("idService=", 1)[1].split("&", 1)[0]
+                        break
+                    except Exception:
+                        pass
+        if not id_service:
+            # fallback: check data-url in buttons (popup)
+            btns = tr.find_all(attrs={"data-url": True})
+            for b in btns:
+                u = b.get("data-url", "")
+                if "idService=" in u:
+                    try:
+                        id_service = u.split("idService=", 1)[1].split("&", 1)[0]
+                        break
+                    except Exception:
+                        pass
+        if not id_service:
+            continue
 
-    colA, colB = st.columns(2)
-    with colA:
-        booking = st.text_area("📘 Booking Information", height=140,
-                               placeholder="Booking ID, Hotel, Dates, Room, Meal plan, Paid amount, Cancellation deadline...")
-        supplier = st.text_area("📨 Supplier Message", height=120)
-    with colB:
-        customer = st.text_area("💬 Customer Message", height=120)
-        policy = st.text_area("📝 Policy Text (optional)", height=120)
+        # hotel name: from "Unit: <a>HOTEL</a>" or from first name cell
+        hotel = None
+        unit_li = tr.find("li", string=lambda s: isinstance(s, str) and "Unit:" in s)
+        if unit_li:
+            # if unit_li text is like "Unit:" then <a> follows
+            a_unit = unit_li.find("a")
+            if a_unit:
+                hotel = a_unit.get_text(strip=True)
+        if not hotel:
+            # fallback: the second <td> (name cell) often contains the hotel name text
+            name_td = tr.find("td")
+            if name_td:
+                t = name_td.get_text(" ", strip=True)
+                # try to remove prefix like [DF]
+                hotel = t.replace("[DF]", "").strip()
+                # keep only first chunk before '—' if present
+                hotel = hotel.split("  ")[0]
 
-    if st.button("Analyze Case with AI", type="primary"):
-        if not os.getenv("OPENAI_API_KEY"):
-            st.error("OPENAI_API_KEY is missing (set it in Streamlit Secrets).")
-        else:
-            prompt = f"""
-You are EBooking Center's Support AI Agent.
+        # stars: count gold stars (text-warning)
+        stars = len(tr.find_all("i", class_="text-warning"))
+        # status:
+        status = None
+        on_sale_badge = tr.find(id=lambda x: x and x.startswith("serviceOnSaleStatus_"))
+        if on_sale_badge:
+            status = on_sale_badge.get_text(strip=True)
+        if not status:
+            # look for 'Status: Finalized' badge in the name cell
+            finalized_badge = tr.find("div", class_="badge", string=lambda s: s and "Status:" in s)
+            if finalized_badge:
+                status = finalized_badge.get_text(strip=True).replace("Status:", "").strip()
 
-Tasks:
-1) Give a clear case summary.
-2) Recommend refund outcome: Approved / Denied / Partial (+reason).
-3) Draft:
-   - Customer reply (professional, respectful, clear).
-   - Supplier message (what we need from them).
-   - Internal note (bullet points only).
+        if not status:
+            status = "Unknown"
 
-Booking:
-{booking}
+        label = f"{hotel} — {stars}⭐ Hotel — ServiceID: {id_service} — {status}"
+        services.append({
+            "idService": id_service,
+            "hotel": hotel,
+            "stars": stars,
+            "status": status,
+            "label": label
+        })
 
-Customer:
-{customer}
+    return services
 
-Supplier:
-{supplier}
 
-Policy:
-{policy}
-"""
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2
-            )
-            result = response.choices[0].message.content
-            st.subheader("✅ AI Result")
-            st.text_area("Generated Response", result, height=500)
+def fetch_day_details(cookies, idService, serviceGroup, priceType, date_yyyy_mm_dd, idScheme, priceSetId):
+    """
+    Calls the AIDA Ajax endpoint that returns the HTML popup for a given date.
+    """
+    url = "https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/Ajax.calendarDayDetails_AC.php"
+    headers = {
+        "Accept": "text/plain, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://aida.ebookingcenter.com",
+        "Referer": f"https://aida.ebookingcenter.com/tourOperator/projects/services/servicePrices/?idService={idService}",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0",
+    }
+    data = {
+        "idService": str(idService),
+        "serviceGroup": serviceGroup,
+        "priceType": priceType,
+        "date": date_yyyy_mm_dd,
+        "idScheme": str(idScheme),
+        "priceSetId": str(priceSetId),
+    }
+    with requests.Session() as s:
+        s.cookies.update(cookies)
+        r = s.post(url, headers=headers, data=data, timeout=30)
+        r.raise_for_status()
+        return r.text
 
-# =========================================
-# SECTION 2 — AIDA Day Prices (login each time)
-# =========================================
-st.markdown("---")
-st.header("🏨 AIDA Day Prices")
 
-col1, col2, col3 = st.columns(3)
+def parse_prices_popup(html: str):
+    """
+    Extract clean rows (Room Type / Occupancy / Price / Currency) from day popup HTML.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+
+    # each occupancy row looks like:
+    # <div class="row py-2 occupancy-row ...">
+    occ_rows = soup.select("div.occupancy-row")
+    current_room_type = None
+
+    # section headers (room type) are divs with class bg-primary
+    # e.g., "SINGLE - STANDARD ROOM"
+    def is_room_header(div):
+        classes = div.get("class", [])
+        return "bg-primary" in classes and "text-uppercase" in classes
+
+    # walk through siblings in order: headers then occupancy rows
+    container = soup.select_one("div.container-fluid")
+    if not container:
+        # fallback: just return raw html if structure changes
+        return out
+
+    for node in container.descendants:
+        if getattr(node, "name", None) == "div" and is_room_header(node):
+            current_room_type = node.get_text(strip=True).title()
+        if getattr(node, "name", None) == "div" and "occupancy-row" in node.get("class", []):
+            # left col: occupancy text like 1*A+1*C1
+            left = node.select_one("div.col-6")
+            right = node.select("div.col-6")[-1] if len(node.select("div.col-6")) >= 2 else None
+            occ_txt = left.get_text(" ", strip=True) if left else ""
+            price_txt = right.get_text(" ", strip=True) if right else ""
+
+            # normalize price like "29 USD" or "45 USD"
+            price_txt = " ".join(price_txt.split())
+            out.append({
+                "room_type": current_room_type or "",
+                "occupancy": occ_txt,
+                "price": price_txt
+            })
+    return out
+
+
+def show_prices_table(rows):
+    if not rows:
+        st.warning("No prices parsed from popup.")
+        return
+    # simple table
+    import pandas as pd
+    df = pd.DataFrame(rows)
+    df[["Price", "Currency"]] = df["price"].str.extract(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)")
+    df = df.drop(columns=["price"])
+    st.dataframe(df, use_container_width=True)
+
+
+# ---------- UI ----------
+st.markdown("## 🏨 AIDA: Pick Service by Hotel Name → Fetch Day Prices")
+
+with st.expander("1) Paste *Services List* HTML (from AIDA)"):
+    st.write("Open **Inventory → Project components → Services**. Copy the full page HTML (or `componentsList` inner HTML) and paste it here.")
+    raw_services_html = st.text_area("Services List HTML", height=220, placeholder="Paste the HTML here...")
+
+hotel_query = st.text_input("Hotel name filter (e.g., “Britannia Suites”)", "")
+
+colA, colB = st.columns([1,1])
+with colA:
+    cookie_aidatour = st.text_input("Cookie: AIDAtourOperator", help="From your browser devtools > Application > Cookies")
+with colB:
+    cookie_aida = st.text_input("Cookie: AIDA", help="From your browser devtools > Application > Cookies")
+
+col1, col2, col3 = st.columns([1,1,1])
 with col1:
-    aida_user = st.text_input("AIDA Username")
+    service_group = st.selectbox("Service Group", ["AC"], index=0)
 with col2:
-    aida_pass = st.text_input("AIDA Password", type="password")
+    price_type = st.selectbox("Price Type", ["supplierPrice", "B1", "B2"], index=0)
 with col3:
-    priceType = st.selectbox("Price Type", ["supplierPrice", "resellerPrice"], index=0)
+    date_val = st.text_input("Date (YYYY-MM-DD)", value="2025-11-05")
 
-col4, col5, col6 = st.columns(3)
+col4, col5 = st.columns([1,1])
 with col4:
-    idProject = st.number_input("idProject", value=194, step=1)
+    id_scheme = st.text_input("idScheme", value="55565")
 with col5:
-    idService = st.number_input("idService", value=10621, step=1)
-with col6:
-    serviceGroup = st.text_input("serviceGroup", value="AC")
+    price_set_id = st.text_input("priceSetId", value="8520")
 
-col7, col8, col9 = st.columns(3)
-with col7:
-    date_iso = st.text_input("Date (YYYY-MM-DD)", value="2025-11-05")
-with col8:
-    idScheme = st.number_input("idScheme", value=55565, step=1)
-with col9:
-    priceSetId = st.number_input("priceSetId", value=8520, step=1)
+# Parse services
+services = []
+if raw_services_html.strip():
+    try:
+        services = parse_services_list(raw_services_html)
+    except Exception as e:
+        st.error(f"Parse error: {e}")
 
-if st.button("Fetch Day Prices", type="secondary"):
-    if not aida_user or not aida_pass:
-        st.error("Enter AIDA credentials.")
+# Filter by hotel name if provided
+if hotel_query.strip():
+    q = hotel_query.strip().lower()
+    services = [s for s in services if q in (s["hotel"] or "").lower()]
+
+# Build dropdown
+selected_service = None
+if services:
+    labels = [s["label"] for s in services]
+    idx = st.selectbox("Choose a service", range(len(services)), format_func=lambda i: labels[i])
+    selected_service = services[idx]
+else:
+    st.info("Paste the Services List HTML and/or type a hotel filter to see services.")
+
+# Fetch button
+st.markdown("---")
+fetch_btn = st.button("🔎 Fetch Day Prices")
+
+if fetch_btn:
+    if not selected_service:
+        st.error("Pick a service first.")
+    elif not cookie_aidatour or not cookie_aida:
+        st.error("Please paste both cookies (AIDAtourOperator and AIDA).")
     else:
+        st.write(f"**Using:** {selected_service['label']}")
+        cookies = {
+            "AIDAtourOperator": cookie_aidatour,
+            "AIDA": cookie_aida
+        }
         try:
-            sess = login_aida(aida_user, aida_pass)
-            html = fetch_day_html(sess,
-                                  int(idProject), int(idService), serviceGroup,
-                                  date_iso, int(idScheme), int(priceSetId), priceType)
+            html = fetch_day_details(
+                cookies=cookies,
+                idService=selected_service["idService"],
+                serviceGroup=service_group,
+                priceType=price_type,
+                date_yyyy_mm_dd=date_val,
+                idScheme=id_scheme,
+                priceSetId=price_set_id
+            )
+            st.caption("✅ RAW HTML RESPONSE (popup) — collapsed")
+            with st.expander("Show raw HTML"):
+                st.code(unescape(html), language="html")
 
-            data = parse_day_html(html)
-
-            # Show scheme
-            if data.get("scheme"):
-                st.caption(f"Pricing scheme: **{data['scheme']}**")
-
-            # Render tables per group
-            if not data["groups"]:
-                st.info("No price rows found for this day / scheme / price set.")
-            else:
-                all_rows = []
-                for grp in data["groups"]:
-                    st.subheader(grp["name"])
-                    if not grp["items"]:
-                        st.write("No items")
-                        continue
-                    df = pd.DataFrame(grp["items"])
-                    st.table(df)
-                    # collect for global CSV
-                    for it in grp["items"]:
-                        all_rows.append({
-                            "group": grp["name"],
-                            "formula": it["formula"],
-                            "price": it["price"],
-                            "currency": it["currency"],
-                            "date": date_iso,
-                            "priceType": priceType
-                        })
-
-                if all_rows:
-                    big = pd.DataFrame(all_rows)
-                    csv = big.to_csv(index=False).encode("utf-8")
-                    st.download_button("⬇️ Download CSV", csv, file_name=f"aida_{idService}_{date_iso}.csv", mime="text/csv")
-
-            # Debug toggle
-            with st.expander("🔧 Raw HTML (debug)"):
-                st.code(html, language="html")
-
+            rows = parse_prices_popup(html)
+            st.success(f"Parsed {len(rows)} price rows.")
+            show_prices_table(rows)
+        except requests.HTTPError as he:
+            st.error(f"HTTP error: {he}")
         except Exception as e:
-            st.error(f"AIDA error: {e}")
+            st.error(f"Failed: {e}")
